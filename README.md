@@ -1,6 +1,14 @@
+<p align="center">
+  <img src="docs/images/logo.png" alt="gracegate Logo" width="130" style="border-radius: 24px;" />
+</p>
+
 # gracegate
 
 Autonomous zero-loss pod draining, in-flight request flusher, and connection handover proxy for Kubernetes workloads.
+
+<p align="center">
+  <img src="docs/images/gracegate_demo.gif" alt="gracegate Live Draining and In-Flight Request Flusher Demo" width="100%" />
+</p>
 
 `gracegate` acts as an ultra-lightweight sidecar proxy (< 10MB RSS memory footprint, sub-microsecond forwarding overhead) deployed alongside application containers. It coordinates Kubernetes pod lifecycle termination signals (`SIGTERM` and `preStop` hooks), maintains open traffic listeners while failing readiness probes, and orderly drains active HTTP/1.1, HTTP/2, and gRPC requests before container shutdown.
 
@@ -160,6 +168,14 @@ gracegate cockpit --port 8282
 
 When `--cockpit-port 8282` is configured, `gracegate` serves an interactive SRE telemetry dashboard with Server-Sent Events (SSE):
 
+<p align="center">
+  <img src="docs/images/cockpit_dashboard.png" alt="gracegate Cockpit Desktop Dashboard" width="100%" />
+</p>
+
+<p align="center">
+  <img src="docs/images/cockpit_mobile.png" alt="gracegate Cockpit Responsive Mobile View" width="360" />
+</p>
+
 - **Live In-Flight Meter**: Real-time counter of concurrent active streams across protocols.
 - **Built-in Traffic Simulator**: Interactive load generator (15 to 150 concurrent workers) to observe live draining in real-time.
 - **Protocol Matrix**: Tracks HTTP/1.1 keep-alive sockets, multiplexed HTTP/2 streams, and gRPC channels.
@@ -169,6 +185,10 @@ When `--cockpit-port 8282` is configured, `gracegate` serves an interactive SRE 
 ---
 
 ## Verification and Benchmarks
+
+<p align="center">
+  <img src="docs/images/terminal_audit.png" alt="gracegate Automated Rolling Update Verification Test" width="100%" />
+</p>
 
 Results from `gracegate test` under simulated rolling update `SIGTERM`:
 

@@ -676,8 +676,61 @@ body {
   }
 }
 
+@media (max-width: 768px) {
+  .navbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    padding: 14px;
+  }
+  .nav-brand {
+    justify-content: space-between;
+  }
+  .nav-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
+  }
+  .sim-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 14px;
+  }
+  .sim-controls {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+  }
+}
+
 @media (max-width: 640px) {
+  .cockpit-container {
+    padding: 12px;
+    gap: 14px;
+  }
+  .navbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .nav-actions {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+  }
+  .nav-actions .live-status-pill,
+  .nav-actions .btn-secondary,
+  .nav-actions .btn-action {
+    width: 100%;
+    justify-content: center;
+    text-align: center;
+  }
   .protocol-grid, .prop-metrics-row {
+    grid-template-columns: 1fr;
+  }
+  .hero-meta-grid {
     grid-template-columns: 1fr;
   }
   .brand-subtitle {
@@ -689,5 +742,10 @@ body {
   .milestone-row {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+  .sim-stats-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
   }
 }
