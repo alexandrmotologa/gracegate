@@ -707,12 +707,18 @@ body {
 @media (max-width: 640px) {
   .cockpit-container {
     padding: 12px;
-    gap: 14px;
+    gap: 12px;
+    max-width: 100%;
+    overflow-x: hidden;
   }
   .navbar {
     flex-direction: column;
     align-items: stretch;
-    gap: 12px;
+    gap: 10px;
+    padding: 12px;
+  }
+  .nav-brand {
+    justify-content: space-between;
   }
   .nav-actions {
     display: flex;
@@ -726,26 +732,153 @@ body {
     width: 100%;
     justify-content: center;
     text-align: center;
+    box-sizing: border-box;
   }
-  .protocol-grid, .prop-metrics-row {
-    grid-template-columns: 1fr;
+  .card {
+    padding: 14px;
+  }
+  .card-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+  }
+  .card-title {
+    font-size: 0.875rem;
+    line-height: 1.3;
+  }
+  .card-badge {
+    align-self: flex-start;
+  }
+  .card-hero {
+    padding: 14px;
+    gap: 14px;
+  }
+  .hero-eyebrow {
+    font-size: 0.6875rem;
+  }
+  .hero-counter {
+    font-size: 2.75rem;
+  }
+  .hero-unit {
+    font-size: 0.6875rem;
+  }
+  .hero-tags {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
   }
   .hero-meta-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+  .meta-item {
+    padding: 10px 12px;
+  }
+  .meta-label {
+    font-size: 0.6875rem;
+  }
+  .meta-value {
+    font-size: 1.25rem;
   }
   .brand-subtitle {
     display: none;
   }
-  .hero-counter {
-    font-size: 3.5rem;
+  .sim-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
   }
-  .milestone-row {
-    grid-template-columns: 1fr;
-    gap: 4px;
+  .sim-title-group {
+    align-items: flex-start;
+  }
+  .sim-controls {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 10px;
+  }
+  .sim-concurrency-select {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .sim-concurrency-select select {
+    width: 100%;
+    max-width: 100%;
+  }
+  .btn-sim {
+    width: 100%;
+    justify-content: center;
   }
   .sim-stats-bar {
     flex-direction: column;
     align-items: flex-start;
     gap: 8px;
+  }
+  .protocol-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .protocol-box {
+    padding: 12px;
+  }
+  .proto-counter {
+    font-size: 1.5rem;
+    margin-bottom: 4px;
+  }
+  .proto-desc {
+    font-size: 0.6875rem;
+  }
+  .prop-metrics-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .prop-stat {
+    padding: 12px;
+  }
+  .prop-stat-val {
+    font-size: 1.25rem;
+  }
+  .prop-stat-note {
+    font-size: 0.6875rem;
+  }
+  .milestone-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .cockpit-footer {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 12px;
+    padding-top: 14px;
+    padding-bottom: 30px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .cockpit-footer > span {
+    display: block;
+    font-size: 0.625rem;
+    line-height: 1.4;
+    text-align: center;
+    padding: 0 10px;
+    width: 100%;
+    box-sizing: border-box;
+    white-space: normal;
+  }
+  .footer-links {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+  }
+  .footer-links a {
+    font-size: 0.75rem;
+    text-align: center;
   }
 }

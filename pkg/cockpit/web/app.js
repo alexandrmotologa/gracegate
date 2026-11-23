@@ -256,7 +256,8 @@
     }
   }
 
-  // Start telemetry loop
+  // Initial fetch and start telemetry loop
+  pollStatus();
   initSSE();
   setInterval(pollStatus, 1000);
 })();
