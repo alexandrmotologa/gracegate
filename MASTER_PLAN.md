@@ -1,27 +1,29 @@
 # gracegate: Architecture and Engineering Master Plan
-Kubernetes Zero-Loss Pod Draining, In-Flight Request Flusher & Connection Handover Proxy
-Target: Ultra-Lightweight Go Sidecar Proxy (< 10MB RAM, sub-microsecond forwarding) with Embedded Cockpit
+Kubernetes Zero-Loss Pod Draining, In-Flight Request Flusher and Connection Handover Proxy
+Target: Ultra-Lightweight Go Sidecar Proxy (< 10MB RAM, sub-microsecond forwarding overhead) with Embedded Cockpit
 
 ---
 
 ## 1. Problem Statement and Scope
 
 ### 1.1 Connection Drops During Kubernetes Rolling Updates
-In modern Kubernetes clusters, applications undergo frequent rolling updates, Horizontal Pod Autoscaling (HPA) scale-downs, spot instance evictions, and node maintenance (`kubectl drain`). When a pod is targeted for termination, Kubernetes initiates two parallel asynchronous processes:
-1. **Endpoint Deregistration**: Kubelet marks the pod as `Terminating`, and the EndpointSlice controller updates endpoints. This change propagates through `kube-proxy` (iptables/IPVS) and external ingress controllers (Envoy, NGINX Ingress, AWS ALB, Traefik). This network propagation introduces an unavoidable **2 to 8 second delay**.
-2. **Pod Process Termination**: Kubelet sends a `SIGTERM` signal to the container process. If the application handles `SIGTERM` by stopping its HTTP listener immediately, it refuses new connections while ingress controllers are still actively routing traffic to it, resulting in a flurry of **502 Bad Gateway** and **Connection Refused** errors.
-3. **Abrupt In-Flight Stream Severing**: Long-running HTTP/1.1 keep-alive connections, multiplexed HTTP/2 streams, and streaming gRPC calls are abruptly killed, dropping financial transactions, file uploads, and active user sessions with `ECONNRESET`.
-4. **The Flaw of Naive "Sleep Hacks"**: Standard practices attempt to mitigate this by inserting `sleep 15` in container `preStop` lifecycle hooks. This blindly slows down CI/CD deployments, fails to signal HTTP/2 `GOAWAY` frames, and still risks cutting off requests if traffic exceeds the hardcoded sleep duration.
+In Kubernetes clusters, applications undergo rolling updates, Horizontal Pod Autoscaling (HPA) scale-downs, spot instance evictions, and node maintenance operations (`kubectl drain`). When a pod is targeted for termination, Kubernetes initiates two parallel asynchronous processes:
+
+1. **Endpoint Deregistration**: Kubelet marks the pod as `Terminating`, and the EndpointSlice controller updates endpoints. This change propagates through `kube-proxy` (iptables or IPVS) and external ingress controllers (Envoy, NGINX Ingress, AWS ALB, Traefik). This network propagation introduces a delay typically between 2 and 8 seconds.
+2. **Pod Process Termination**: Kubelet sends a `SIGTERM` signal to the container process. If the application handles `SIGTERM` by stopping its HTTP listener immediately, it refuses new connections while ingress controllers still route traffic to it, resulting in **502 Bad Gateway** and **Connection Refused** errors.
+3. **Abrupt In-Flight Stream Severing**: Active HTTP/1.1 keep-alive connections, multiplexed HTTP/2 streams, and streaming gRPC calls are terminated mid-flight, resulting in dropped transactions, truncated payloads, and client `ECONNRESET` errors.
+4. **The Flaw of Static Sleep Workarounds**: Inserting `sleep 15` in container `preStop` lifecycle hooks slows down CI/CD rollouts, fails to emit RFC-compliant HTTP/2 `GOAWAY` frames, and still risks cutting off requests if traffic duration exceeds the hardcoded sleep value.
 
 ### 1.2 The gracegate Solution
-`gracegate` is an autonomous zero-loss sidecar proxy and pod lifecycle sentinel written in pure Go:
-- **Zero-Overhead Transparent Sidecar**: Deployed as an ultra-lightweight (< 10MB RAM) sidecar proxy sitting between the ingress/mesh and the application container.
+`gracegate` operates as an autonomous zero-loss sidecar proxy and pod lifecycle sentinel written in Go:
+
+- **Low-Overhead Transparent Sidecar**: Runs in the same pod network namespace as the target application container (< 10MB RSS memory footprint, sub-microsecond forwarding overhead).
 - **Two-Phase Draining State Machine**:
-  - **Phase 1 (Network Quorum Wait)**: Upon receiving `SIGTERM`, `gracegate` fails its local readiness probe to signal ingress controllers to remove the pod from routing tables, while keeping its traffic listener fully open and serving in-flight and newly arriving packets.
-  - **Phase 2 (Protocol-Specific Drain)**: Sends standard HTTP/2 and gRPC `GOAWAY` frames, sets `Connection: close` headers on HTTP/1.1 keep-alive responses, and waits for all active in-flight requests to complete cleanly.
-- **Adaptive In-Flight Request Flusher**: Actively monitors the exact in-flight request counter, terminating the process only when the counter reaches zero or an adaptive safety deadline is reached.
-- **Propagation Latency Profiler**: Measures exact cluster iptables/IPVS propagation delays, allowing platform teams to configure precise, minimal termination budgets.
-- **Embedded Web Cockpit**: A visual cockpit on port 8282 showing real-time in-flight request gauges, pod draining timelines, and zero-error verification proofs.
+  - **Phase 1 (Network Quorum Wait)**: Upon receiving `SIGTERM` (or a `preStop` HTTP trigger), `gracegate` switches its local readiness probe `/gracegate/healthz` to HTTP 503 to signal ingress controllers to remove the pod from routing tables. The traffic listener remains fully operational to accept any packets still in transit.
+  - **Phase 2 (Protocol-Specific Drain)**: Sends standard HTTP/2 and gRPC `GOAWAY` frames, sets `Connection: close` headers on HTTP/1.1 keep-alive responses, and waits for all active in-flight requests to complete.
+- **Adaptive In-Flight Request Flusher**: Continuously tracks atomic counters of active requests, concluding the drain phase when the counter reaches zero or when a safety deadline expires.
+- **Propagation Latency Profiler**: Measures cluster ingress and iptables/IPVS propagation delays, allowing platform teams to configure precise termination budgets.
+- **Embedded Web Cockpit**: Serves a real-time diagnostics dashboard on port 8282 showing in-flight request gauges, waterfall timelines, and zero-error verification proofs.
 
 ---
 
@@ -62,13 +64,13 @@ In modern Kubernetes clusters, applications undergo frequent rolling updates, Ho
 |  1. Ingress detects /healthz failure -> Stops new routes    |
 |  2. In-flight requests drain to 0                           |
 |  3. gracegate forwards clean SIGTERM to Application         |
-|  4. Pod exits with ZERO dropped requests (100% 2xx/3xx/4xx) |
+|  4. Pod exits with zero dropped requests (100% 2xx/3xx/4xx) |
 +-------------------------------------------------------------+
 ```
 
 ---
 
-## 3. Mathematical & Algorithmic Formulation
+## 3. Mathematical and Algorithmic Formulation
 
 ### 3.1 Network Propagation and Drain Horizon
 Let $T_{\text{sig}}$ denote the timestamp when Kubelet issues `SIGTERM`. The network propagation delay across cluster ingress endpoints follows a distribution $T_{\text{prop}} \sim \mathcal{D}(\mu_{\text{prop}}, \sigma_{\text{prop}})$.
@@ -81,6 +83,7 @@ $$T_{\text{drain}} \ge \max\left(T_{\text{prop}}\right) + \max_{i \in \text{In-F
 
 ### 3.2 Two-Step HTTP/2 and gRPC GOAWAY Protocol
 For HTTP/2 and gRPC multiplexed streams, abruptly closing the TCP connection causes client-side stream truncation. `gracegate` enforces RFC 7540 graceful shutdown:
+
 1. **Step 1 (Advisory Frame)**: Transmits a `GOAWAY` frame with stream identifier $2^{31} - 1$ (`0x7FFFFFFF`). This advises the client to cease creating new streams on this connection while continuing current work.
 2. **Step 2 (Final Frame)**: After a propagation delay $\delta = \hat{\mu}_{\text{prop}}$, transmits a second `GOAWAY` frame containing the exact identifier $S_{\text{last}}$ of the highest stream processed by the application.
 3. TCP socket is closed only when all active streams $\le S_{\text{last}}$ receive complete response frames.
@@ -94,28 +97,58 @@ $$\text{Dropped Request Rate} = 0.00\%$$
 
 ---
 
-## 4. Component Design and Subsystems
+## 4. Enhanced Subsystems and Extensions
 
 ### 4.1 Transparent Traffic Proxy (`pkg/proxy`)
-- Ultra-low memory proxy written in Go using `net.TCPListener` and zero-copy `io.CopyBuffer`.
-- Intercepts inbound ports (e.g. `8080`) and forwards directly to application container on loopback (e.g. `127.0.0.1:8081`).
-- Atomic In-Flight Counter: Increments on new request headers; decrements when the response stream finishes writing.
+- Low memory forwarder written in Go using zero-allocation buffer pools (`sync.Pool`).
+- Supports transparent HTTP/1.1, HTTP/2, and gRPC connection proxying.
+- Atomic counters track active in-flight requests and total connections per protocol.
+- Latency tracking calculates exact forwarding overhead (p50, p95, p99).
 
-### 4.2 Lifecycle & Signal Interceptor (`pkg/lifecycle`)
+### 4.2 Lifecycle and Signal Interceptor (`pkg/lifecycle`)
 - Traps OS `SIGTERM` and `SIGINT` signals.
-- Manages the `/gracegate/healthz` endpoint: returns HTTP 200 during normal operation; instantly switches to HTTP 503 upon `SIGTERM` to fail K8s readiness checks.
-- Enforces configurable maximum graceful termination timeout (`--drain-timeout 30s`).
+- Manages `/gracegate/healthz` (Readiness) and `/gracegate/livez` (Liveness) HTTP endpoints.
+- Two-Phase Drain State Machine:
+  - `StateRunning`: normal operation, health probes return 200 OK.
+  - `StateDrainingQuorum`: readiness probe returns 503 Service Unavailable, proxy continues forwarding in-flight and incoming traffic while ingress deregisters pod.
+  - `StateDrainingInflight`: protocol-specific teardown active (`Connection: close`, `GOAWAY`), waiting for active in-flight count to hit zero.
+  - `StateTerminated`: sends graceful shutdown signal to backend application and exits.
 
-### 4.3 Protocol Drainer (`pkg/protocol`)
-- **HTTP/1.1 Drainer**: Injects `Connection: close` header into response headers during drain phase, preventing keep-alive connection reuse.
-- **HTTP/2 & gRPC Drainer**: Low-level frame parser that intercepts HPACK headers and injects binary `GOAWAY` frames directly onto client sockets.
+### 4.3 Protocol Drain Engine (`pkg/protocol`)
+- **HTTP/1.1 Engine**: Parses response headers, appends `Connection: close` during drain states, and gracefully flushes the socket.
+- **HTTP/2 & gRPC Engine**: Constructs raw HTTP/2 frames (`GOAWAY`, `PING`, `WINDOW_UPDATE`). Emits RFC 7540 two-step `GOAWAY` sequences and drains gRPC channels with status codes and trailers preserved.
+- **EWMA Propagation Estimator**: Exponentially weighted moving average of ingress propagation latency to adaptively optimize drain timers.
 
-### 4.4 Embedded Diagnostics Cockpit (`pkg/cockpit`)
-- Serves interactive dashboard on port 8282.
-- Features:
-  - **Live In-Flight Meter**: Real-time gauge showing currently active requests and drain progression.
-  - **Termination Sequence Waterfall**: Visual timeline mapping exact milliseconds: `SIGTERM Received` -> `Readiness Failed` -> `Ingress Traffic Cessation` -> `In-Flight Emptied` -> `Clean Exit`.
-  - **Cluster Propagation Latency Stats**: Calculates true ingress propagation time to optimize cluster-wide termination grace periods.
+### 4.4 Kubernetes Manifest Generator and Injector (`pkg/inject`)
+- CLI command `gracegate inject` parses existing Kubernetes Deployment or Pod YAML files.
+- Injects `gracegate` sidecar container with:
+  - Loopback port routing configuration.
+  - Container `preStop` HTTP hook pointing to `http://localhost:9090/gracegate/drain`.
+  - Tuned `terminationGracePeriodSeconds`.
+  - Zero-drift resource requests (10m CPU, 16Mi RAM).
+
+### 4.5 Propagation Latency Auditor (`pkg/audit`)
+- CLI command `gracegate audit` measures cluster ingress propagation delay.
+- Emits test probes against endpoints during rolling updates to detect the exact moment routing tables converge.
+- Exports structured JSON audit reports and summary charts.
+
+### 4.6 Embedded Diagnostics Cockpit (`pkg/cockpit`)
+- Runs a web server on port 8282 with Server-Sent Events (SSE) telemetry.
+- Real-time in-flight request gauge with instant status updates.
+- Visual waterfall timeline documenting each milestone in milliseconds:
+  - `SIGTERM Captured`
+  - `Readiness Fails (HTTP 503)`
+  - `Last Ingress Request Received`
+  - `In-Flight Requests Flushed`
+  - `Pod Exit Clean`
+- Zero-loss verification badge validating 100% successful response codes.
+
+### 4.7 Prometheus Metrics Exporter (`pkg/metrics`)
+- Exposes standard Prometheus `/metrics` endpoint:
+  - `gracegate_inflight_requests`: current gauge of active requests.
+  - `gracegate_requests_total`: counter labeled by protocol and status code.
+  - `gracegate_drain_duration_seconds`: histogram of pod drain duration.
+  - `gracegate_drain_phase`: current state machine phase (0=running, 1=quorum, 2=inflight, 3=done).
 
 ---
 
@@ -128,22 +161,28 @@ gracegate proxy \
   --target "127.0.0.1:8081" \
   --health-port 9090 \
   --drain-timeout 30s \
-  --cockpit
+  --cockpit-port 8282
 
 # Audit cluster ingress propagation delay during a deployment rollout
 gracegate audit \
-  --namespace production \
-  --deployment order-service \
-  --probes 50 \
-  --output ./reports/propagation_latency.json
+  --target "http://order-service.default.svc.cluster.local:8080/health" \
+  --probes 100 \
+  --interval 50ms \
+  --output ./propagation_audit.json
 
-# Test graceful shutdown locally against a simulated HTTP/2 backend
+# Test graceful shutdown locally against a simulated HTTP/1.1 and HTTP/2 backend
 gracegate test \
-  --target "http://localhost:8081" \
   --concurrency 100 \
+  --duration 5s \
   --simulate-sigterm-at 2s
 
-# Launch Cockpit UI directly
+# Inject gracegate sidecar into an existing Kubernetes deployment manifest
+gracegate inject \
+  --file deployment.yaml \
+  --app-port 8080 \
+  --output deployment.patched.yaml
+
+# Launch standalone Cockpit UI
 gracegate cockpit --port 8282
 ```
 
@@ -168,21 +207,27 @@ B:\workgit\gracegate\
 │   ├── protocol/
 │   │   ├── http1.go                 # HTTP/1.1 Connection: close injector
 │   │   ├── http2.go                 # HTTP/2 binary GOAWAY frame builder
-│   │   └── grpc.go                  # gRPC status and channel drainer
+│   │   ├── grpc.go                  # gRPC status and channel drainer
+│   │   └── estimator.go             # EWMA propagation delay estimator
+│   ├── inject/
+│   │   └── injector.go              # Kubernetes YAML manifest sidecar injector
 │   ├── audit/
 │   │   └── propagation.go           # Ingress propagation latency profiler
+│   ├── metrics/
+│   │   └── metrics.go               # Prometheus metrics exporter
 │   └── cockpit/
-│       ├── server.go                # Embedded HTTP server
+│       ├── server.go                # Embedded HTTP server with SSE
 │       └── web/
 │           ├── index.html           # Draining timeline and live gauge UI
 │           ├── app.js               # Visual waterfall and in-flight meter
 │           └── style.css            # Dark tech clean UI styling
 ├── test/
-│   ├── mock_backend.go              # Slow-responding HTTP/1.1 & HTTP/2 mock
+│   ├── mock_backend.go              # Slow-responding HTTP/1.1, HTTP/2, and gRPC mock
 │   └── drain_test.go                # Verification of zero dropped requests
 ├── go.mod
 ├── go.sum
 ├── README.md
+├── LICENSE
 └── MASTER_PLAN.md
 ```
 
@@ -190,26 +235,34 @@ B:\workgit\gracegate\
 
 ## 7. Implementation Roadmap
 
-### Phase 1: High-Speed Stream Forwarder & Atomic Counter
-- Initialize Go module `github.com/mtlglabs/gracegate`.
-- Implement zero-overhead TCP forwarder with atomic in-flight counter.
-- Verify forwarding latency: strictly $< 0.1\text{ms}$ overhead.
+### Phase 1: Core Scaffolding and High-Speed Forwarder
+- Initialize Go module `github.com/alexandrmotologa/gracegate`.
+- Implement zero-allocation buffer pool and atomic in-flight request counter.
+- Build high-throughput stream forwarder for HTTP/1.1, HTTP/2, and gRPC.
+- Implement Prometheus metrics instrumentation.
 
-### Phase 2: Kube Lifecycle FSM & Signal Interceptor
-- Implement OS signal trapping and `/healthz` readiness controller.
-- Implement Two-Phase Drain Finite State Machine.
-- Build adaptive timeout termination coordinator.
+### Phase 2: Lifecycle FSM and Signal Trapping
+- Build OS signal trap (`SIGTERM`, `SIGINT`) and HTTP `preStop` drain trigger.
+- Implement readiness/liveness HTTP controller (`/gracegate/healthz`, `/gracegate/livez`).
+- Implement two-phase drain finite state machine with adaptive timeout.
 
-### Phase 3: HTTP/2 & gRPC GOAWAY Protocol Engine
-- Implement binary HTTP/2 `GOAWAY` frame generator.
-- Implement HTTP/1.1 `Connection: close` header mutator.
-- Test with simulated multiplexed client streams.
+### Phase 3: Protocol Drain Engines and EWMA Profiler
+- Build HTTP/1.1 `Connection: close` header injector.
+- Build HTTP/2 raw frame parser and two-step `GOAWAY` frame emitter (RFC 7540).
+- Build gRPC stream awareness and trailer preservation.
+- Implement EWMA propagation latency estimator.
 
-### Phase 4: Embedded Cockpit Dashboard
-- Implement HTTP server on port 8282.
-- Render interactive in-flight request gauge and termination timeline waterfall.
-- Build live cluster ingress propagation delay calculator.
+### Phase 4: Kubernetes Injector and Ingress Propagation Auditor
+- Implement `gracegate inject` command for zero-friction YAML patching.
+- Implement `gracegate audit` engine to probe real-time ingress convergence times.
 
-### Phase 5: Verification and Benchmarks
-- Benchmark memory footprint: strictly $< 10\text{MB}$ RSS.
-- Verify zero dropped connections across 1,000 parallel requests during live `SIGTERM`.
+### Phase 5: Embedded Diagnostics Cockpit (Port 8282)
+- Build HTTP server with Server-Sent Events (SSE) telemetry.
+- Create dark tech UI dashboard with live in-flight gauges, timeline waterfall, and zero-loss certificate proof.
+- Verify responsiveness and layout integrity.
+
+### Phase 6: Automated Verification, Benchmarks and Documentation
+- Build test harness (`test/mock_backend.go` and `test/drain_test.go`).
+- Verify zero dropped requests during heavy simulated rolling update with SIGTERM.
+- Run memory and CPU benchmarks confirming < 10MB RSS and sub-microsecond overhead.
+- Compile factual documentation and README adhering to humanizer guidelines.
