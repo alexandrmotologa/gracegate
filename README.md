@@ -18,6 +18,8 @@ During Kubernetes rolling deployments, HPA autoscaling down-events, and node dra
 - **Phase 1 (Quorum Wait)**: When `SIGTERM` arrives, `gracegate` switches `/gracegate/healthz` to HTTP 503 to alert ingress controllers. The proxy listener remains active and forwards any in-transit packets.
 - **Phase 2 (Protocol Drain)**: After the quorum duration expires, `gracegate` injects `Connection: close` into HTTP/1.1 response headers and transmits RFC 7540 `GOAWAY` frames to HTTP/2 and gRPC connections.
 - **Flushing Horizon**: The proxy blocks container termination until active in-flight requests reach zero, or until a safety deadline expires.
+- **L4 Quiescence Inspection**: Inspects kernel TCP socket queues (`/proc/net/tcp` and send buffers) to guarantee zero unacknowledged packets remain in kernel flight before pod shutdown.
+- **Proactive Early Failover**: A built-in circuit breaker isolates failing backends from Ingress within milliseconds if consecutive 5xx errors occur, without waiting for slow 15-second Kubernetes probe cycles.
 
 ---
 
@@ -82,7 +84,7 @@ go build -o bin/gracegate ./cmd/gracegate
 ## CLI Reference
 
 ### 1. Run Sidecar Proxy
-Starts the transparent forwarder, health server, Prometheus exporter, and embedded web Cockpit:
+Starts the transparent forwarder, health server, Prometheus exporter, circuit breaker, and embedded web Cockpit:
 ```bash
 gracegate proxy \
   --listen ":8080" \
@@ -90,16 +92,19 @@ gracegate proxy \
   --health-port 9090 \
   --drain-timeout 30s \
   --quorum-duration 3s \
+  --circuit-breaker=true \
+  --circuit-breaker-errors 5 \
   --cockpit-port 8282
 ```
 
-### 2. Audit Ingress Propagation Latency
-Measures real-time ingress routing convergence times during pod termination:
+### 2. Audit Ingress Propagation Latency with Interactive TUI
+Measures real-time ingress routing convergence times during pod termination with a live terminal progress stream:
 ```bash
 gracegate audit \
   --target "http://order-service.default.svc.cluster.local:8080/health" \
   --probes 50 \
   --interval 50ms \
+  --interactive \
   --output ./reports/propagation_latency.json
 ```
 
@@ -112,7 +117,27 @@ gracegate test \
   --simulate-sigterm-at 1s
 ```
 
-### 4. Patch Kubernetes Manifests
+### 4. Kubernetes Mutating Admission Webhook (Zero-Touch Injection)
+Runs the mutating admission webhook to automatically inject the `gracegate` sidecar into any pod annotated with `gracegate.io/inject: "true"`:
+```bash
+# Run TLS webhook server in cluster
+gracegate webhook --port 8443 --cert /tls/tls.crt --key /tls/tls.key
+
+# Generate MutatingWebhookConfiguration YAML
+gracegate webhook install --service gracegate-webhook --namespace kube-system
+```
+
+### 5. Export Grafana Dashboard and Prometheus Alert Rules
+Generates production-ready observability assets:
+```bash
+# Export Grafana Dashboard JSON
+gracegate export grafana --output grafana_dashboard.json
+
+# Export PrometheusRule alerting manifest
+gracegate export alerts --namespace monitoring --output prometheus_alerts.yaml
+```
+
+### 6. Patch Kubernetes Manifests Manually
 Injects the `gracegate` sidecar container and `preStop` hook into a deployment YAML:
 ```bash
 gracegate inject \
@@ -123,7 +148,7 @@ gracegate inject \
   --output deployment.patched.yaml
 ```
 
-### 5. Launch Standalone Cockpit UI
+### 7. Launch Standalone Cockpit UI
 Starts the diagnostics dashboard on port 8282:
 ```bash
 gracegate cockpit --port 8282
@@ -131,75 +156,15 @@ gracegate cockpit --port 8282
 
 ---
 
-## Kubernetes Integration
+## Embedded Web Cockpit (Port 8282)
 
-Inject `gracegate` into your deployment manifest:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: billing-service
-spec:
-  replicas: 3
-  template:
-    spec:
-      terminationGracePeriodSeconds: 60
-      containers:
-        - name: gracegate-proxy
-          image: alexandrmotologa/gracegate:v1.0.0
-          args:
-            - "proxy"
-            - "--listen"
-            - ":8080"
-            - "--target"
-            - "127.0.0.1:8081"
-            - "--health-port"
-            - "9090"
-            - "--quorum-duration"
-            - "3s"
-            - "--drain-timeout"
-            - "30s"
-          ports:
-            - containerPort: 8080
-            - containerPort: 9090
-            - containerPort: 8282
-          lifecycle:
-            preStop:
-              httpGet:
-                path: /gracegate/drain?sync=true
-                port: 9090
-                scheme: HTTP
-          readinessProbe:
-            httpGet:
-              path: /gracegate/healthz
-              port: 9090
-              scheme: HTTP
-            periodSeconds: 1
-          resources:
-            requests:
-              cpu: "10m"
-              memory: "16Mi"
-
-        - name: billing-api
-          image: myorg/billing-api:1.0.0
-          env:
-            - name: PORT
-              value: "8081"
-          ports:
-            - containerPort: 8081
-```
-
----
-
-## Embedded Web Cockpit
-
-When `--cockpit-port 8282` is configured, `gracegate` serves a real-time SRE telemetry dashboard with Server-Sent Events (SSE):
+When `--cockpit-port 8282` is configured, `gracegate` serves an interactive SRE telemetry dashboard with Server-Sent Events (SSE):
 
 - **Live In-Flight Meter**: Real-time counter of concurrent active streams across protocols.
+- **Built-in Traffic Simulator**: Interactive load generator (15 to 150 concurrent workers) to observe live draining in real-time.
 - **Protocol Matrix**: Tracks HTTP/1.1 keep-alive sockets, multiplexed HTTP/2 streams, and gRPC channels.
-- **Waterfall Timeline**: Records exact millisecond milestones (`PROCESS_START`, `DRAIN_TRIGGERED`, `QUORUM_COMPLETE`, `TERMINATED`).
-- **Propagation Lag Stats**: Profiles cluster ingress convergence and observed delay.
+- **Waterfall Timeline**: Records exact millisecond milestones (`PROCESS_START`, `DRAIN_TRIGGERED`, `QUORUM_COMPLETE`, `L4_QUIESCENCE_VERIFIED`, `TERMINATED`).
+- **Post-Mortem Audit Export**: One-click download of timestamped post-mortem JSON reports (`/api/export`).
 
 ---
 

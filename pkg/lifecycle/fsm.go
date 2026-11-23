@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alexandrmotologa/gracegate/pkg/proxy"
+	"github.com/alexandrmotologa/gracegate/pkg/socket"
 )
 
 // Phase represents the current stage in the pod draining lifecycle.
@@ -61,8 +62,9 @@ type Config struct {
 
 // FSM orchestrates the two-phase graceful draining finite state machine.
 type FSM struct {
-	config  Config
-	tracker *proxy.AtomicTracker
+	config          Config
+	tracker         *proxy.AtomicTracker
+	socketInspector *socket.Inspector
 
 	mu          sync.RWMutex
 	current     Phase
@@ -103,6 +105,13 @@ func NewFSM(cfg Config, tracker *proxy.AtomicTracker) *FSM {
 
 	fsm.recordMilestone("PROCESS_START", "gracegate initialized in RUNNING state")
 	return fsm
+}
+
+// SetSocketInspector sets an optional L4 socket queue inspector.
+func (f *FSM) SetSocketInspector(ins *socket.Inspector) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.socketInspector = ins
 }
 
 // CurrentPhase returns the active lifecycle state.
@@ -219,6 +228,20 @@ func (f *FSM) executeDrain(startTime time.Time) {
 	}
 
 	drained := f.tracker.WaitForZeroInFlight(remainingBudget)
+
+	f.mu.RLock()
+	ins := f.socketInspector
+	f.mu.RUnlock()
+
+	if ins != nil {
+		quiescent, stats := ins.WaitForL4Quiescence(2 * time.Second)
+		if quiescent {
+			f.mu.Lock()
+			f.recordMilestone("L4_QUIESCENCE_VERIFIED", fmt.Sprintf("Kernel socket queues empty: %s", stats.FormatSummary()))
+			f.mu.Unlock()
+		}
+	}
+
 	inflightEnd := time.Now().UTC()
 
 	f.mu.Lock()

@@ -23,6 +23,10 @@
           <span class="pulse-indicator"></span>
           <span id="global-status-text">RUNNING</span>
         </div>
+        <a id="btn-export-report" class="btn-secondary" href="/api/export" download>
+          <span class="btn-icon">⬇</span>
+          <span class="btn-label">Export Audit JSON</span>
+        </a>
         <button id="btn-trigger-drain" class="btn-action">
           <span class="btn-icon">⚡</span>
           <span class="btn-label">Trigger Draining</span>
@@ -65,6 +69,48 @@
               <span class="meta-label">AVG FORWARD LATENCY</span>
               <span class="meta-value" id="val-avg-latency">0.08 ms</span>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Interactive Traffic Generator Control Bar -->
+      <section class="card card-simulator">
+        <div class="sim-header">
+          <div class="sim-title-group">
+            <span class="sim-icon">🚀</span>
+            <div class="sim-text">
+              <div class="sim-title">Live Traffic Simulator & Load Tester</div>
+              <div class="sim-subtitle">Generate synthetic concurrent requests to observe real-time in-flight draining dynamics</div>
+            </div>
+          </div>
+          <div class="sim-controls">
+            <div class="sim-concurrency-select">
+              <label for="select-concurrency">Concurrency:</label>
+              <select id="select-concurrency">
+                <option value="15">15 Workers (~150 req/s)</option>
+                <option value="35" selected>35 Workers (~350 req/s)</option>
+                <option value="80">80 Workers (~800 req/s)</option>
+                <option value="150">150 Workers (~1500 req/s)</option>
+              </select>
+            </div>
+            <button id="btn-toggle-sim" class="btn-sim">
+              <span class="btn-icon">▶</span>
+              <span class="btn-label" id="btn-sim-text">Start Synthetic Load</span>
+            </button>
+          </div>
+        </div>
+        <div class="sim-stats-bar" id="sim-stats-bar" style="display: none;">
+          <div class="sim-stat-item">
+            <span class="sim-stat-lbl">Simulated Sent:</span>
+            <span class="sim-stat-num" id="sim-sent-val">0</span>
+          </div>
+          <div class="sim-stat-item">
+            <span class="sim-stat-lbl">Success (2xx):</span>
+            <span class="sim-stat-num text-emerald" id="sim-success-val">0</span>
+          </div>
+          <div class="sim-stat-item">
+            <span class="sim-stat-lbl">Status:</span>
+            <span class="badge badge-success" id="sim-status-badge">ACTIVE</span>
           </div>
         </div>
       </section>
@@ -163,6 +209,7 @@
         <a href="/gracegate/healthz" target="_blank">/gracegate/healthz</a>
         <a href="/metrics" target="_blank">/metrics (Prometheus)</a>
         <a href="/gracegate/timeline" target="_blank">/gracegate/timeline</a>
+        <a href="/api/export" target="_blank">/api/export (JSON)</a>
       </div>
     </footer>
   </div>

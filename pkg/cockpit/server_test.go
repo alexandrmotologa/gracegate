@@ -71,4 +71,43 @@ func TestCockpitServer(t *testing.T) {
 	if !fsm.IsDraining() {
 		t.Fatalf("expected FSM to be draining")
 	}
+
+	// 4. Test simulate API
+	simReqBody := `{"action":"start","concurrency":5}`
+	respSim, err := client.Post(ts.URL+"/api/simulate", "application/json", strings.NewReader(simReqBody))
+	if err != nil {
+		t.Fatalf("failed to post simulate: %v", err)
+	}
+	defer respSim.Body.Close()
+	if respSim.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for simulate, got %d", respSim.StatusCode)
+	}
+
+	// Let simulation tick briefly
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop simulation
+	stopReqBody := `{"action":"stop"}`
+	respStop, err := client.Post(ts.URL+"/api/simulate", "application/json", strings.NewReader(stopReqBody))
+	if err != nil {
+		t.Fatalf("failed to stop simulate: %v", err)
+	}
+	defer respStop.Body.Close()
+	if respStop.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for stop simulate, got %d", respStop.StatusCode)
+	}
+
+	// 5. Test export report API
+	respExport, err := client.Get(ts.URL + "/api/export")
+	if err != nil {
+		t.Fatalf("failed to fetch export report: %v", err)
+	}
+	defer respExport.Body.Close()
+	if respExport.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for export, got %d", respExport.StatusCode)
+	}
+	exportBytes, _ := io.ReadAll(respExport.Body)
+	if !strings.Contains(string(exportBytes), "gracegate v1.0.0 Sentinel") {
+		t.Fatalf("expected export report to contain system signature, got: %s", string(exportBytes))
+	}
 }

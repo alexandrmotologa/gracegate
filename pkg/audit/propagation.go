@@ -56,8 +56,14 @@ type AuditReport struct {
 
 // Auditor conducts propagation delay profiling.
 type Auditor struct {
-	config AuditConfig
-	client *http.Client
+	config  AuditConfig
+	client  *http.Client
+	onProbe func(res ProbeResult, successful, failed, dropped int)
+}
+
+// SetOnProbe registers a real-time callback for each emitted probe.
+func (a *Auditor) SetOnProbe(fn func(res ProbeResult, successful, failed, dropped int)) {
+	a.onProbe = fn
 }
 
 // NewAuditor creates an ingress propagation auditor.
@@ -177,7 +183,14 @@ func (a *Auditor) Run(ctx context.Context) (*AuditReport, error) {
 
 		mu.Lock()
 		report.Probes = append(report.Probes, res)
+		succ := report.SuccessfulProbes
+		fail := report.FailedProbes
+		drop := report.DroppedRequests
 		mu.Unlock()
+
+		if a.onProbe != nil {
+			a.onProbe(res, succ, fail, drop)
+		}
 	}
 
 	report.TotalProbes = len(report.Probes)

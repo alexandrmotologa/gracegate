@@ -22,7 +22,14 @@
     propLag: document.getElementById('prop-lag'),
     propQuorum: document.getElementById('prop-quorum'),
     propInflightDur: document.getElementById('prop-inflight-dur'),
-    propTotalTime: document.getElementById('prop-total-time')
+    propTotalTime: document.getElementById('prop-total-time'),
+    btnToggleSim: document.getElementById('btn-toggle-sim'),
+    btnSimText: document.getElementById('btn-sim-text'),
+    selectConcurrency: document.getElementById('select-concurrency'),
+    simStatsBar: document.getElementById('sim-stats-bar'),
+    simSentVal: document.getElementById('sim-sent-val'),
+    simSuccessVal: document.getElementById('sim-success-val'),
+    simStatusBadge: document.getElementById('sim-status-badge')
   };
 
   // Uptime ticker
@@ -111,6 +118,21 @@
       if (el.propInflightDur) el.propInflightDur.textContent = `${tl.inflight_drain_ms || 0} ms`;
       if (el.propTotalTime) el.propTotalTime.textContent = `${tl.total_drain_ms || 0} ms`;
     }
+
+    // Simulation stats
+    if (data.simulation) {
+      const sim = data.simulation;
+      if (sim.active) {
+        if (el.simStatsBar) el.simStatsBar.style.display = 'flex';
+        if (el.simSentVal) el.simSentVal.textContent = sim.requests_sent.toLocaleString();
+        if (el.simSuccessVal) el.simSuccessVal.textContent = sim.requests_success.toLocaleString();
+        if (el.btnSimText) el.btnSimText.textContent = 'Stop Load Generator';
+        if (el.btnToggleSim) el.btnToggleSim.classList.add('sim-running');
+      } else {
+        if (el.btnSimText) el.btnSimText.textContent = 'Start Synthetic Load';
+        if (el.btnToggleSim) el.btnToggleSim.classList.remove('sim-running');
+      }
+    }
   }
 
   function renderMilestones(milestones) {
@@ -155,6 +177,40 @@
           alert('Network error triggering drain: ' + err.message);
           el.btnTriggerDrain.disabled = false;
         }
+      }
+    });
+  }
+
+  // Toggle Traffic Simulator action
+  let isSimRunning = false;
+  if (el.btnToggleSim) {
+    el.btnToggleSim.addEventListener('click', async () => {
+      const concurrency = parseInt(el.selectConcurrency ? el.selectConcurrency.value : '35', 10);
+      const action = isSimRunning ? 'stop' : 'start';
+
+      try {
+        el.btnToggleSim.disabled = true;
+        const res = await fetch('/api/simulate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: action, concurrency: concurrency })
+        });
+
+        if (res.ok) {
+          isSimRunning = !isSimRunning;
+          if (isSimRunning) {
+            if (el.simStatsBar) el.simStatsBar.style.display = 'flex';
+            if (el.btnSimText) el.btnSimText.textContent = 'Stop Load Generator';
+            el.btnToggleSim.classList.add('sim-running');
+          } else {
+            if (el.btnSimText) el.btnSimText.textContent = 'Start Synthetic Load';
+            el.btnToggleSim.classList.remove('sim-running');
+          }
+        }
+      } catch (err) {
+        alert('Simulator error: ' + err.message);
+      } finally {
+        el.btnToggleSim.disabled = false;
       }
     });
   }

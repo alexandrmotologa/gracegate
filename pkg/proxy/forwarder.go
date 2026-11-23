@@ -25,21 +25,23 @@ type DrainStateProvider interface {
 
 // Config holds configuration parameters for the forwarder.
 type Config struct {
-	ListenAddr    string
-	TargetAddr    string
-	DrainTimeout  time.Duration
-	EnableH2C     bool
-	StateProvider DrainStateProvider
+	ListenAddr     string
+	TargetAddr     string
+	DrainTimeout   time.Duration
+	EnableH2C      bool
+	StateProvider  DrainStateProvider
+	CircuitBreaker *CircuitBreaker
 }
 
 // Forwarder manages high-performance transparent proxying between ingress and the local app container.
 type Forwarder struct {
-	config     Config
-	tracker    *AtomicTracker
-	bufferPool *BufferPool
-	server     *http.Server
-	targetURL  *url.URL
-	reverse    *httputil.ReverseProxy
+	config         Config
+	tracker        *AtomicTracker
+	circuitBreaker *CircuitBreaker
+	bufferPool     *BufferPool
+	server         *http.Server
+	targetURL      *url.URL
+	reverse        *httputil.ReverseProxy
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -86,11 +88,12 @@ func NewForwarder(cfg Config, tracker *AtomicTracker) (*Forwarder, error) {
 	}
 
 	fwd := &Forwarder{
-		config:     cfg,
-		tracker:    tracker,
-		bufferPool: pool,
-		targetURL:  parsedURL,
-		stopChan:   make(chan struct{}),
+		config:         cfg,
+		tracker:        tracker,
+		circuitBreaker: cfg.CircuitBreaker,
+		bufferPool:     pool,
+		targetURL:      parsedURL,
+		stopChan:       make(chan struct{}),
 	}
 
 	revProxy := httputil.NewSingleHostReverseProxy(parsedURL)
@@ -140,6 +143,9 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		dur := time.Since(startTime)
 		done(trackingWriter.statusCode, r.ContentLength, trackingWriter.bytesWritten, dur)
+		if f.circuitBreaker != nil {
+			f.circuitBreaker.RecordResult(trackingWriter.statusCode)
+		}
 	}()
 
 	f.reverse.ServeHTTP(trackingWriter, r)

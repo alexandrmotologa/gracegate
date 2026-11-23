@@ -14,12 +14,13 @@ import (
 
 // HealthServer manages Kubernetes probe endpoints and lifecycle triggers.
 type HealthServer struct {
-	listenAddr string
-	fsm        *FSM
-	tracker    *proxy.AtomicTracker
-	server     *http.Server
-	mux        *http.ServeMux
-	mu         sync.Mutex
+	listenAddr     string
+	fsm            *FSM
+	tracker        *proxy.AtomicTracker
+	circuitBreaker *proxy.CircuitBreaker
+	server         *http.Server
+	mux            *http.ServeMux
+	mu             sync.Mutex
 }
 
 // NewHealthServer creates a health probe HTTP server.
@@ -83,9 +84,26 @@ func (h *HealthServer) Stop(ctx context.Context) error {
 	return nil
 }
 
+// SetCircuitBreaker attaches a circuit breaker for proactive early failover.
+func (h *HealthServer) SetCircuitBreaker(cb *proxy.CircuitBreaker) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.circuitBreaker = cb
+}
+
 func (h *HealthServer) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	phase := h.fsm.CurrentPhase()
 	w.Header().Set("Content-Type", "application/json")
+
+	h.mu.Lock()
+	cb := h.circuitBreaker
+	h.mu.Unlock()
+
+	if cb != nil && cb.IsTripped() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = fmt.Fprintf(w, `{"status":"DOWN","phase":%q,"reason":"CIRCUIT_BREAKER_TRIPPED","message":%q}`, phase, cb.TrippedReason())
+		return
+	}
 
 	if phase == PhaseRunning {
 		w.WriteHeader(http.StatusOK)

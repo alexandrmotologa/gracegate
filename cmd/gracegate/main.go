@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -18,10 +19,13 @@ import (
 
 	"github.com/alexandrmotologa/gracegate/pkg/audit"
 	"github.com/alexandrmotologa/gracegate/pkg/cockpit"
+	"github.com/alexandrmotologa/gracegate/pkg/export"
 	"github.com/alexandrmotologa/gracegate/pkg/inject"
 	"github.com/alexandrmotologa/gracegate/pkg/lifecycle"
 	"github.com/alexandrmotologa/gracegate/pkg/metrics"
 	"github.com/alexandrmotologa/gracegate/pkg/proxy"
+	"github.com/alexandrmotologa/gracegate/pkg/socket"
+	"github.com/alexandrmotologa/gracegate/pkg/webhook"
 )
 
 func main() {
@@ -42,6 +46,10 @@ func main() {
 		runInject(args)
 	case "cockpit":
 		runCockpit(args)
+	case "export":
+		runExport(args)
+	case "webhook":
+		runWebhook(args)
 	case "test":
 		runTest(args)
 	case "version":
@@ -65,7 +73,9 @@ Commands:
   proxy    Run as an ultra-low latency sidecar proxy wrapping the application container
   audit    Audit cluster ingress and iptables/IPVS propagation delay during rollout
   inject   Inject gracegate sidecar into Kubernetes YAML deployment manifests
-  cockpit  Launch standalone diagnostics Cockpit dashboard
+  webhook  Run Kubernetes mutating admission webhook server for zero-touch sidecar injection
+  export   Export Grafana dashboards and Prometheus alerting rules (PrometheusRule)
+  cockpit  Launch standalone diagnostics Cockpit dashboard (port 8282)
   test     Execute automated end-to-end zero-loss verification under simulated SIGTERM
   version  Display gracegate version information
 
@@ -80,6 +90,8 @@ func runProxy(args []string) {
 	drainTimeout := fs.Duration("drain-timeout", 30*time.Second, "Maximum duration to wait for in-flight requests to flush")
 	quorumDuration := fs.Duration("quorum-duration", 3*time.Second, "Quorum wait duration for ingress propagation")
 	cockpitPort := fs.Int("cockpit-port", 8282, "Port for embedded web Cockpit (set 0 to disable)")
+	enableCircuitBreaker := fs.Bool("circuit-breaker", true, "Enable proactive backend circuit breaker to fail readiness early on errors")
+	cbFailures := fs.Int("circuit-breaker-errors", 5, "Consecutive 5xx errors to trip the circuit breaker")
 
 	_ = fs.Parse(args)
 
@@ -91,14 +103,31 @@ func runProxy(args []string) {
 		DrainTimeout:   *drainTimeout,
 	}, tracker)
 
+	socketInspector := socket.NewInspector()
+	fsm.SetSocketInspector(socketInspector)
+
 	_ = lifecycle.NewSignalTrap(fsm)
+
+	var cb *proxy.CircuitBreaker
+	if *enableCircuitBreaker {
+		cb = proxy.NewCircuitBreaker(proxy.CircuitBreakerConfig{
+			Enabled:             true,
+			ConsecutiveFailures: *cbFailures,
+			RecoverySuccesses:   3,
+			CooldownDuration:    5 * time.Second,
+		})
+		cb.SetOnStateChange(func(state proxy.CircuitBreakerState, reason string) {
+			log.Printf("[gracegate circuit-breaker] transition to %s: %s", state, reason)
+		})
+	}
 
 	// Proxy forwarder
 	fwdCfg := proxy.Config{
-		ListenAddr:    *listenAddr,
-		TargetAddr:    *targetAddr,
-		DrainTimeout:  *drainTimeout,
-		StateProvider: fsm,
+		ListenAddr:     *listenAddr,
+		TargetAddr:     *targetAddr,
+		DrainTimeout:   *drainTimeout,
+		StateProvider:  fsm,
+		CircuitBreaker: cb,
 	}
 	fwd, err := proxy.NewForwarder(fwdCfg, tracker)
 	if err != nil {
@@ -113,6 +142,9 @@ func runProxy(args []string) {
 	// Health and Prometheus server
 	healthAddr := fmt.Sprintf(":%d", *healthPort)
 	healthServer := lifecycle.NewHealthServer(healthAddr, fsm, tracker)
+	if cb != nil {
+		healthServer.SetCircuitBreaker(cb)
+	}
 	healthServer.MountHandler("/metrics", metrics.Handler(tracker, &fsmPhaseAdapter{fsm: fsm}))
 
 	if err := healthServer.Start(); err != nil {
@@ -124,6 +156,7 @@ func runProxy(args []string) {
 	var cockpitServer *cockpit.Server
 	if *cockpitPort > 0 {
 		cockpitServer = cockpit.NewServer(*cockpitPort, tracker, fsm)
+		cockpitServer.SetProxyAddress(fmt.Sprintf("http://127.0.0.1%s", *listenAddr))
 		if err := cockpitServer.Start(); err != nil {
 			log.Printf("[gracegate] warning: failed to bind cockpit on port %d: %v", *cockpitPort, err)
 		} else {
@@ -165,6 +198,7 @@ func runAudit(args []string) {
 	timeout := fs.Duration("timeout", 2*time.Second, "Timeout per probe")
 	outputFile := fs.String("output", "", "Optional JSON output path for audit results")
 	drainTrigger := fs.String("drain-trigger", "", "Optional URL to trigger pod drain midway through audit")
+	interactive := fs.Bool("interactive", true, "Render interactive terminal TUI with live progress bar")
 
 	_ = fs.Parse(args)
 
@@ -174,7 +208,13 @@ func runAudit(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("[gracegate audit] probing target: %s (%d probes, interval: %v)\n", *target, *probes, *interval)
+	fmt.Printf("\n=== gracegate Ingress Propagation Profiler ===\n")
+	fmt.Printf(" Target:        %s\n", *target)
+	fmt.Printf(" Probes:        %d (Interval: %v, Timeout: %v)\n", *probes, *interval, *timeout)
+	if *drainTrigger != "" {
+		fmt.Printf(" Drain Trigger: %s (firing at probe #%d)\n", *drainTrigger, *probes/3)
+	}
+	fmt.Println("----------------------------------------------")
 
 	auditor := audit.NewAuditor(audit.AuditConfig{
 		TargetURL:    *target,
@@ -185,12 +225,38 @@ func runAudit(args []string) {
 		DrainTrigger: *drainTrigger,
 	})
 
-	report, err := auditor.Run(context.Background())
-	if err != nil {
-		log.Fatalf("[gracegate audit] execution failed: %v", err)
+	if *interactive {
+		totalP := *probes
+		auditor.SetOnProbe(func(res audit.ProbeResult, successful, failed, dropped int) {
+			pct := int(float64(res.Sequence) / float64(totalP) * 100)
+			barWidth := 20
+			filled := barWidth * res.Sequence / totalP
+			if filled > barWidth {
+				filled = barWidth
+			}
+			bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+
+			statusLabel := fmt.Sprintf("%d OK ", res.StatusCode)
+			marker := "[OK]"
+			if res.IsDuringDrain {
+				marker = "[DRAIN]"
+			}
+			if res.StatusCode >= 500 || res.Error != "" {
+				marker = "[DROP]"
+				statusLabel = "ERR/DROP"
+			}
+
+			fmt.Printf("\r[%s] %3d%% (#%2d/%2d) %-7s %6.2fms %s",
+				bar, pct, res.Sequence, totalP, marker, res.LatencyMs, statusLabel)
+		})
 	}
 
-	fmt.Println("\n================= INGRESS PROPAGATION AUDIT REPORT =================")
+	report, err := auditor.Run(context.Background())
+	if err != nil {
+		log.Fatalf("\n[gracegate audit] execution failed: %v", err)
+	}
+
+	fmt.Printf("\n\n================= INGRESS PROPAGATION AUDIT REPORT =================\n")
 	fmt.Printf(" Target:                 %s\n", report.TargetURL)
 	fmt.Printf(" Total Probes Emitted:   %d\n", report.TotalProbes)
 	fmt.Printf(" Successful Probes:      %d (%.2f%%)\n", report.SuccessfulProbes, float64(report.SuccessfulProbes)/float64(report.TotalProbes)*100)
@@ -251,6 +317,58 @@ func runInject(args []string) {
 	}
 }
 
+func runExport(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: gracegate export [grafana|alerts] [options]")
+		os.Exit(1)
+	}
+
+	sub := args[0]
+	subArgs := args[1:]
+
+	switch sub {
+	case "grafana":
+		fs := flag.NewFlagSet("export grafana", flag.ExitOnError)
+		title := fs.String("title", "gracegate - Kubernetes Zero-Loss Pod Draining Overview", "Grafana dashboard title")
+		output := fs.String("output", "", "Optional output file path (defaults to stdout)")
+		_ = fs.Parse(subArgs)
+
+		dash, err := export.GenerateGrafanaDashboard(*title)
+		if err != nil {
+			log.Fatalf("[gracegate export] failed: %v", err)
+		}
+
+		if *output != "" {
+			if err := os.WriteFile(*output, []byte(dash), 0644); err != nil {
+				log.Fatalf("[gracegate export] failed to write %s: %v", *output, err)
+			}
+			fmt.Printf("[gracegate export] Grafana dashboard written to %s\n", *output)
+		} else {
+			fmt.Println(dash)
+		}
+
+	case "alerts":
+		fs := flag.NewFlagSet("export alerts", flag.ExitOnError)
+		ns := fs.String("namespace", "monitoring", "Target Kubernetes namespace for PrometheusRule")
+		output := fs.String("output", "", "Optional output file path (defaults to stdout)")
+		_ = fs.Parse(subArgs)
+
+		rules := export.GeneratePrometheusRules(*ns)
+		if *output != "" {
+			if err := os.WriteFile(*output, []byte(rules), 0644); err != nil {
+				log.Fatalf("[gracegate export] failed to write %s: %v", *output, err)
+			}
+			fmt.Printf("[gracegate export] Prometheus alerting rules written to %s\n", *output)
+		} else {
+			fmt.Println(rules)
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "unknown export target: %q (expected 'grafana' or 'alerts')\n", sub)
+		os.Exit(1)
+	}
+}
+
 func runCockpit(args []string) {
 	fs := flag.NewFlagSet("cockpit", flag.ExitOnError)
 	port := fs.Int("port", 8282, "Port on which to host Cockpit web UI")
@@ -276,6 +394,55 @@ func runCockpit(args []string) {
 
 	_ = server.Stop(context.Background())
 	fmt.Println("\n[gracegate cockpit] stopped.")
+}
+
+func runWebhook(args []string) {
+	if len(args) > 0 && args[0] == "install" {
+		fs := flag.NewFlagSet("webhook install", flag.ExitOnError)
+		svc := fs.String("service", "gracegate-webhook", "Service name of the webhook server")
+		ns := fs.String("namespace", "kube-system", "Namespace of the webhook service")
+		ca := fs.String("ca-bundle", "", "Base64 encoded CA bundle for API server trust")
+		_ = fs.Parse(args[1:])
+
+		manifest := webhook.GenerateWebhookManifest(*svc, *ns, *ca)
+		fmt.Println(manifest)
+		return
+	}
+
+	fs := flag.NewFlagSet("webhook", flag.ExitOnError)
+	port := fs.Int("port", 8443, "TLS port for admission webhook server")
+	certFile := fs.String("cert", "", "Path to TLS certificate file")
+	keyFile := fs.String("key", "", "Path to TLS private key file")
+	image := fs.String("image", "alexandrmotologa/gracegate:v1.0.0", "gracegate sidecar image to inject")
+	listenPort := fs.Int("listen-port", 8080, "Sidecar traffic port")
+	targetPort := fs.Int("target-port", 8081, "Application target port on loopback")
+	healthPort := fs.Int("health-port", 9090, "Sidecar health probe port")
+	cockpitPort := fs.Int("cockpit-port", 8282, "Sidecar cockpit dashboard port")
+
+	_ = fs.Parse(args)
+
+	server := webhook.NewServer(*image, *listenPort, *targetPort, *healthPort, *cockpitPort)
+	mux := http.NewServeMux()
+	mux.Handle("/mutate", server)
+
+	httpServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", *port),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	fmt.Printf("[gracegate webhook] running mutating admission webhook on port %d\n", *port)
+
+	if *certFile != "" && *keyFile != "" {
+		if err := httpServer.ListenAndServeTLS(*certFile, *keyFile); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[gracegate webhook] TLS server failed: %v", err)
+		}
+	} else {
+		fmt.Println("[gracegate webhook] WARNING: running in HTTP mode (requires TLS in Kubernetes production)")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[gracegate webhook] HTTP server failed: %v", err)
+		}
+	}
 }
 
 func runTest(args []string) {
