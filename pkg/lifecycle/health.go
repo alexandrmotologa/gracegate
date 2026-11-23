@@ -18,18 +18,20 @@ type HealthServer struct {
 	fsm        *FSM
 	tracker    *proxy.AtomicTracker
 	server     *http.Server
+	mux        *http.ServeMux
 	mu         sync.Mutex
 }
 
 // NewHealthServer creates a health probe HTTP server.
 func NewHealthServer(listenAddr string, fsm *FSM, tracker *proxy.AtomicTracker) *HealthServer {
+	mux := http.NewServeMux()
 	hs := &HealthServer{
 		listenAddr: listenAddr,
 		fsm:        fsm,
 		tracker:    tracker,
+		mux:        mux,
 	}
 
-	mux := http.NewServeMux()
 	mux.HandleFunc("/gracegate/healthz", hs.handleReadiness)
 	mux.HandleFunc("/gracegate/livez", hs.handleLiveness)
 	mux.HandleFunc("/gracegate/drain", hs.handleDrainTrigger)
@@ -43,6 +45,13 @@ func NewHealthServer(listenAddr string, fsm *FSM, tracker *proxy.AtomicTracker) 
 	}
 
 	return hs
+}
+
+// MountHandler registers an additional HTTP handler on the health server.
+func (h *HealthServer) MountHandler(pattern string, handler http.Handler) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.mux.Handle(pattern, handler)
 }
 
 // Start runs the health server in the background.

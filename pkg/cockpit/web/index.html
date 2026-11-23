@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gracegate Cockpit | Zero-Loss Pod Draining Sentinel</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="cockpit-container">
+    <!-- Top Navigation Bar -->
+    <header class="navbar">
+      <div class="nav-brand">
+        <div class="brand-badge">
+          <span class="brand-dot"></span>
+          <span class="brand-title">gracegate</span>
+          <span class="brand-version">v1.0.0</span>
+        </div>
+        <span class="brand-subtitle">Kubernetes Zero-Loss Connection Handover Sentinel</span>
+      </div>
+      <div class="nav-actions">
+        <div class="live-status-pill" id="global-status-pill">
+          <span class="pulse-indicator"></span>
+          <span id="global-status-text">RUNNING</span>
+        </div>
+        <button id="btn-trigger-drain" class="btn-action">
+          <span class="btn-icon">⚡</span>
+          <span class="btn-label">Trigger Draining</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Grid Content -->
+    <main class="dashboard-grid">
+      <!-- Top Hero Banner: Verification Proof & In-Flight Gauge -->
+      <section class="card card-hero">
+        <div class="hero-left">
+          <div class="hero-eyebrow">ACTIVE IN-FLIGHT REQUESTS</div>
+          <div class="hero-counter-wrap">
+            <div class="hero-counter" id="counter-inflight">0</div>
+            <div class="hero-unit">CONCURRENT STREAMS</div>
+          </div>
+          <div class="hero-tags">
+            <span class="badge badge-success" id="badge-zero-loss">
+              <span class="badge-icon">✓</span> ZERO DROPPED REQUESTS (100.00% SUCCESS)
+            </span>
+            <span class="badge badge-neutral" id="badge-uptime">UPTIME: 00:00:00</span>
+          </div>
+        </div>
+        <div class="hero-right">
+          <div class="hero-meta-grid">
+            <div class="meta-item">
+              <span class="meta-label">TOTAL FORWARDED</span>
+              <span class="meta-value" id="val-total-reqs">0</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">SERVER ERRORS</span>
+              <span class="meta-value text-emerald" id="val-total-errs">0</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">ACTIVE CLIENT TCP</span>
+              <span class="meta-value" id="val-active-clients">0</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">AVG FORWARD LATENCY</span>
+              <span class="meta-value" id="val-avg-latency">0.08 ms</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Protocol Breakdown Row -->
+      <section class="card card-protocols">
+        <div class="card-header">
+          <h2 class="card-title">Protocol In-Flight Matrix</h2>
+          <span class="card-badge">RFC 7540 DUAL-STAGE GOAWAY ENABLED</span>
+        </div>
+        <div class="protocol-grid">
+          <div class="protocol-box">
+            <div class="proto-header">
+              <span class="proto-tag tag-http1">HTTP/1.1</span>
+              <span class="proto-state" id="http1-state">KEEP-ALIVE</span>
+            </div>
+            <div class="proto-counter" id="proto-http1-val">0</div>
+            <div class="proto-desc">Connection: close injector on drain</div>
+          </div>
+          <div class="protocol-box">
+            <div class="proto-header">
+              <span class="proto-tag tag-http2">HTTP/2</span>
+              <span class="proto-state" id="http2-state">MULTIPLEXED</span>
+            </div>
+            <div class="proto-counter" id="proto-http2-val">0</div>
+            <div class="proto-desc">Two-phase binary GOAWAY frames</div>
+          </div>
+          <div class="protocol-box">
+            <div class="proto-header">
+              <span class="proto-tag tag-grpc">gRPC</span>
+              <span class="proto-state" id="grpc-state">STREAMING</span>
+            </div>
+            <div class="proto-counter" id="proto-grpc-val">0</div>
+            <div class="proto-desc">Channel handover & trailer preservation</div>
+          </div>
+          <div class="protocol-box">
+            <div class="proto-header">
+              <span class="proto-tag tag-ewma">PROPAGATION EWMA</span>
+              <span class="proto-state" id="ewma-state">OPTIMAL</span>
+            </div>
+            <div class="proto-counter" id="proto-ewma-val">2.8s</div>
+            <div class="proto-desc">Cluster ingress convergence budget</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Draining Waterfall Timeline -->
+      <section class="card card-timeline">
+        <div class="card-header">
+          <h2 class="card-title">Pod Termination Sequence Waterfall</h2>
+          <span class="card-badge" id="timeline-phase-badge">PHASE: RUNNING</span>
+        </div>
+        <div class="timeline-visual" id="timeline-container">
+          <!-- Dynamically populated milestones -->
+          <div class="timeline-empty" id="timeline-empty-msg">
+            Pod is currently in healthy RUNNING state. Timeline milestones will record in real-time when SIGTERM or preStop drain hook is triggered.
+          </div>
+        </div>
+      </section>
+
+      <!-- Cluster Propagation Latency & Ingress Convergence Audit -->
+      <section class="card card-propagation">
+        <div class="card-header">
+          <h2 class="card-title">Network Quorum & Propagation Latency Profiler</h2>
+          <span class="card-badge">IPTABLES / IPVS / ENVOY CONVERGENCE</span>
+        </div>
+        <div class="prop-metrics-row">
+          <div class="prop-stat">
+            <div class="prop-stat-label">Measured Ingress Lag</div>
+            <div class="prop-stat-val" id="prop-lag">0 ms</div>
+            <div class="prop-stat-note">Last packet arrived after 503</div>
+          </div>
+          <div class="prop-stat">
+            <div class="prop-stat-label">Quorum Wait Duration</div>
+            <div class="prop-stat-val" id="prop-quorum">3,000 ms</div>
+            <div class="prop-stat-note">Configured safety buffer</div>
+          </div>
+          <div class="prop-stat">
+            <div class="prop-stat-label">In-Flight Drain Duration</div>
+            <div class="prop-stat-val" id="prop-inflight-dur">0 ms</div>
+            <div class="prop-stat-note">Time from quorum to zero in-flight</div>
+          </div>
+          <div class="prop-stat">
+            <div class="prop-stat-label">Total Draining Time</div>
+            <div class="prop-stat-val" id="prop-total-time">0 ms</div>
+            <div class="prop-stat-note">Full zero-loss termination horizon</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="cockpit-footer">
+      <span>gracegate v1.0.0 | High-Availability Kubernetes Sidecar Sentinel</span>
+      <div class="footer-links">
+        <a href="/gracegate/healthz" target="_blank">/gracegate/healthz</a>
+        <a href="/metrics" target="_blank">/metrics (Prometheus)</a>
+        <a href="/gracegate/timeline" target="_blank">/gracegate/timeline</a>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
